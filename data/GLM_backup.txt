@@ -1,0 +1,183 @@
+#!/user/bin/python
+# codeing=utf-8
+
+import datetime
+from config import config
+import numpy as np
+
+class sentence():
+    def __init__(self):
+        self.words = []
+        self.tags = []
+
+class dataSet(object):
+    def __init__(self,filename):
+        self.sentences = []
+        self.name = filename
+
+    def open_file(self):
+        self.file = open(self.name, mode='r', encoding='utf-8')
+
+    def close_file(self):
+        self.file.close()
+
+    def read_data(self,sentenceLen):
+        sentenceCount = 0 # 给句子计数
+        wordCount = 0 # 给词计数
+        sen = sentence()
+        for s in self.file:
+            if(s == '\n'):
+                self.sentences.append(sen)
+                sentenceCount += 1
+                if(sentenceLen != -1 and sentenceCount >= sentenceLen):
+                    break
+                continue
+            list_s = s.split('\t')
+            word = list_s[1]
+            tag = list_s[3]
+            sen.words.append(word)
+            sen.tags.append(tag)
+            wordCount += 1
+        print(self.name + " contains " + str(sentenceCount) + " sentences ")
+        print(self.name + " contains " + str(wordCount) + " words ")
+
+class global_linear_model(object):
+    def __init__(self, train_data, dev_data, test_data):
+        self.train_data = dataSet(train_data) if train_data != None else None
+        self.dev_data = dataSet(dev_data) if dev_data != None else None
+        # self.test_data = dataSet(test_data) if test_data != None else None
+        # 读取数据
+        self.train_data.open_file()
+        self.train_data.read_data(-1)
+        self.train_data.close_file()
+        self.dev_data.open_file()
+        self.dev_data.read_data(-1)
+        self.dev_data.close_file()
+        # 属性：特征，权重，v，标签-索引词典，索引-标签词典，标签列表，开始标志
+        self.features = {}
+        self.w = []
+        self.v = []
+        self.tag_id = {}
+        # self.id_tag = {}
+        self.tagsList = []
+        self.BOS = "BOS"
+
+    '''构造转移特征'''
+    def create_bi_feature(self, pre_tag, cur_tag):
+        return ['01:' + cur_tag + '*' +pre_tag]
+
+    '''构造发射特征'''
+    def create_uni_feature(self, sen, pos, cur_tag):
+        template = []
+        cur_word = sen.words[pos]
+        cur_word_first_char = cur_word[0]
+        cur_word_last_char = cur_word[-1]
+        if pos == 0:
+            pre_word = '##'
+            pre_word_last_char = "#"
+        else:
+            pre_word = sen.words[pos-1]
+            pre_word_last_char = pre_word[-1]
+
+        if pos == len(sen.words)-1:
+            next_word = "$$"
+            next_word_first_char = "$"
+        else:
+            next_word = sen.words[pos+1]
+            next_word_first_char = next_word[0]
+
+        template.append("02:" + cur_tag + "*" + cur_word)
+        template.append("03:" + cur_tag + "*" + pre_word)
+        template.append("04:" + cur_tag + "*" + next_word)
+        template.append("05:" + cur_tag + "*" + cur_word + "*" + pre_word_last_char)
+        template.append("06:" + cur_tag + "*" + cur_word + "*" + next_word_first_char)
+        template.append("07:" + cur_tag + "*" + cur_word_first_char)
+        template.append("08:" + cur_tag + "*" + cur_word_last_char)
+
+        for i in range(1,len(cur_word)-1):
+            template.append("09:" + cur_tag + "*" + cur_word[i])
+            template.append("10:" + cur_tag + "*" + cur_word[0] + "*" + cur_word[i])
+            template.append("11:" + cur_tag + "*" + cur_word[-1] + "*" + cur_word[i])
+            if cur_word[i] == cur_word[i+1]:
+                template.append("13:" + cur_tag + "*" + cur_word[i] + "*" + "consecutive")
+        if len(cur_word)>1 and cur_word[0] == cur_word[1]:
+            template.append("13:" + cur_tag + "*" + cur_word[0] + "*" + "consecutive")
+
+        if len(cur_word) == 1:
+            template.append("12:" + cur_tag + "*" + cur_word + "*" + pre_word_last_char + "*" + next_word_first_char)
+
+        for i in range(0,4):
+            if i > len(cur_word)-1:
+                break
+            template.append("14:" + cur_tag + "*" + cur_word[0:i+1])
+            template.append("15:" + cur_tag + "*" + cur_word[-(i+1)::])
+        return template
+
+    '''构造单个特征向量'''
+    def create_feature_template(self,sen,pos,pre_tag,cur_tag):
+        template = []
+        # 一个转移
+        template.extend(self.create_bi_feature(pre_tag,cur_tag))
+        # 一个发射
+        template.extend(self.create_uni_feature(sen,pos,cur_tag))
+        return template
+
+    '''构造特征空间，对每个句子构造特征向量'''
+    def create_feature_space(self):
+        for i in range(len(self.train_data.sentences)):
+            sen = self.train_data.sentences[i]
+            for j in range(len(sen.words)):
+                if j == 0:
+                    pre_tag = self.BOS
+                else:
+                    pre_tag = sen.tags[j-1]
+                template = self.create_feature_template(sen, j, pre_tag, sen.tags[j])
+                for f in template:
+                    if f not in self.features:
+                        self.features[f] = len(self.features)
+                for tag in sen.tags:
+                    if tag not in self.tagsList:
+                        self.tagsList.append(tag)
+        self.tagsList = sorted(self.tagsList)
+        self.tag_id = {t: i for i, t in enumerate(self.tagsList)}
+        self.w = np.zeros(len(self.features))
+        self.v = np.zeros(len(self.features))
+        # self.update_times = np.zeros(len(self.features))
+        self.bi_features = [ # 建立转移矩阵
+            [self.create_bi_feature(pre_tag,tag) for pre_tag in self.tagsList]
+            for tag in self.tagsList
+        ]
+
+        print("the total number of features is %d" % (len(self.features)))
+
+    def online_train(self,iteration=20, averaged=False, shuffle=False, exitor = 10):
+        
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+if __name__ == "__main__":
+    train_data_file = config['train_data_file']
+    dev_data_file = config['dev_data_file']
+    test_data_file = config['test_data_file']
+    averaged = config['averaged']
+    iterator = config['iterator']
+    shuffle = config['shuffle']
+    exitor = config['exitor']
+
+    startTime = datetime.datetime.now()
+    model = global_linear_model(train_data_file,dev_data_file,test_data_file)
+    model.create_feature_space()
+
+    endTime = datetime.datetime.now()
+    print("executing time is " + str((endTime-startTime).seconds) + "s")
