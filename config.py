@@ -1,3 +1,5 @@
+
+
 config = {
     'train_data_file': '../data/train.conll',  # 训练集文件
     'dev_data_file': '../data/dev.conll',  # 开发集文件
